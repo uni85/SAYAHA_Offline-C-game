@@ -1,0 +1,1318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>SAYAHA - The Shadow Take Over</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #000; overflow: hidden;
+    overscroll-behavior: none; touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  #stage { position: fixed; inset: 0; display: flex; justify-content: center; align-items: center; }
+  canvas#game { display: block; background: #000; touch-action: none; }
+
+  #controls { display: none; position: fixed; left: 0; right: 0; bottom: 0; height: 0; z-index: 5; pointer-events: none; }
+  body.touch #controls { display: block; }
+  .pad { position: absolute; bottom: calc(14px + env(safe-area-inset-bottom)); display: flex; gap: 12px; align-items: flex-end; }
+  #padL { left: calc(14px + env(safe-area-inset-left)); }
+  #padR { right: calc(14px + env(safe-area-inset-right)); }
+  .btn {
+    pointer-events: auto; touch-action: none;
+    width: 78px; height: 78px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font: bold 30px Verdana, Geneva, sans-serif; color: rgba(255,241,232,0.95);
+    background: rgba(255,255,255,0.16); border: 3px solid rgba(255,255,255,0.45);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  }
+  .btn.big { width: 96px; height: 96px; font-size: 38px; background: rgba(255,236,39,0.22); border-color: rgba(255,236,39,0.7); }
+  .btn.small { width: 58px; height: 58px; font-size: 22px; }
+  .btn.on { background: rgba(255,255,255,0.45); transform: scale(0.94); }
+  .btn.big.on { background: rgba(255,236,39,0.5); }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="game" width="768" height="768"></canvas></div>
+
+<div id="controls">
+  <div class="pad" id="padL">
+    <div class="btn" data-key="ArrowLeft">&#9664;</div>
+    <div class="btn" data-key="ArrowRight">&#9654;</div>
+  </div>
+  <div class="pad" id="padR">
+    <div class="btn small" data-key="KeyW">W</div>
+    <div class="btn" data-key="KeyZ">A</div>
+    <div class="btn big" data-key="KeyS">S</div>
+  </div>
+</div>
+
+<script>
+(function () {
+'use strict';
+
+// ============================================================================
+// SETUP
+// ============================================================================
+var WIN = 768, BW = 128, SCALE = 6;
+var FONT = 'Verdana, Geneva, "DejaVu Sans", sans-serif';
+var canvas = document.getElementById('game');
+var ctx = canvas.getContext('2d');
+var buf = document.createElement('canvas');
+buf.width = BW; buf.height = BW;
+var bctx = buf.getContext('2d');
+var K = 1;
+var T0 = performance.now();
+function getTime() { return (performance.now() - T0) / 1000; }
+
+var isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) ||
+  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+function enableTouchUI() { isTouch = true; document.body.classList.add('touch'); layout(); }
+if (isTouch) document.body.classList.add('touch');
+window.addEventListener('touchstart', function () { if (!document.body.classList.contains('touch')) enableTouchUI(); }, { passive: true });
+
+// ============================================================================
+// INPUT
+// ============================================================================
+var keys = { down: {}, pressed: {} };
+function keyPress(code) { if (!keys.down[code]) keys.pressed[code] = true; keys.down[code] = true; }
+function keyRelease(code) { keys.down[code] = false; }
+function isDown() { for (var i = 0; i < arguments.length; i++) if (keys.down[arguments[i]]) return true; return false; }
+function isPressed() { for (var i = 0; i < arguments.length; i++) if (keys.pressed[arguments[i]]) return true; return false; }
+
+window.addEventListener('keydown', function (e) {
+  keyPress(e.code);
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].indexOf(e.code) >= 0) e.preventDefault();
+});
+window.addEventListener('keyup', function (e) { keyRelease(e.code); });
+window.addEventListener('blur', function () { keys.down = {}; });
+window.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+// On-screen buttons (touch / mouse).
+(function () {
+  var btns = document.querySelectorAll('.btn');
+  Array.prototype.forEach.call(btns, function (el) {
+    var code = el.getAttribute('data-key');
+    function down(e) { e.preventDefault(); try { el.setPointerCapture(e.pointerId); } catch (_) {} keyPress(code); el.classList.add('on'); }
+    function up(e) { e.preventDefault(); keyRelease(code); el.classList.remove('on'); }
+    el.addEventListener('pointerdown', down);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+    el.addEventListener('lostpointercapture', function () { keyRelease(code); el.classList.remove('on'); });
+  });
+})();
+
+// Tapping the canvas acts as ENTER on the title / end screens.
+canvas.addEventListener('pointerdown', function (e) {
+  if (app_screen !== SCREEN_GAME) { e.preventDefault(); keyPress('Enter'); setTimeout(function () { keyRelease('Enter'); }, 80); }
+});
+
+// ============================================================================
+// LAYOUT
+// ============================================================================
+function layout() {
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var touch = document.body.classList.contains('touch');
+  var size;
+  if (touch && vh > vw) size = Math.min(vw, vh - 200);
+  else size = Math.min(vw, vh);
+  size = Math.max(160, Math.floor(size));
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+  var stage = document.getElementById('stage');
+  stage.style.alignItems = (touch && vh > vw) ? 'flex-start' : 'center';
+  var dpr = Math.min(window.devicePixelRatio || 1, 3);
+  canvas.width = canvas.height = Math.floor(size * dpr);
+  K = canvas.width / WIN;
+}
+window.addEventListener('resize', layout);
+window.addEventListener('orientationchange', function () { setTimeout(layout, 100); });
+
+// ============================================================================
+// COLORS / SPRITES
+// ============================================================================
+function rgb(r, g, b) { return 'rgb(' + r + ',' + g + ',' + b + ')'; }
+function rgba(r, g, b, a) { return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')'; }
+var C = {
+  BLACK: rgb(0, 0, 0), DARK_BLUE: rgb(29, 43, 83), BUILDING_BLUE: rgb(50, 68, 120),
+  DARK_PURP: rgb(126, 37, 83), DARK_GREEN: rgb(0, 135, 81), GROUND: rgb(6, 76, 45),
+  BROWN: rgb(171, 82, 54), DARK_GRAY: rgb(95, 87, 79), POLE: rgb(35, 33, 31),
+  WHITE: rgb(255, 241, 232), YELLOW: rgb(255, 236, 39), GREEN: rgb(0, 228, 54),
+  RED: rgb(255, 0, 77), TITLE_BG: rgb(8, 45, 20), WATER: rgba(40, 90, 170, 0.82)
+};
+var PAL = [null, rgb(0, 0, 0), rgb(29, 43, 83), rgb(126, 37, 83), rgb(95, 87, 79),
+  rgb(255, 241, 232), rgb(255, 204, 170), rgb(255, 236, 39), rgb(255, 0, 77), rgb(171, 82, 54)];
+
+var SPR_PLAYER_IDLE = [[0,0,1,1,1,1,0,0],[0,1,6,6,6,6,1,0],[0,1,1,6,1,6,1,0],[0,1,6,6,6,6,1,0],[0,0,8,8,8,8,0,0],[0,1,8,8,8,8,1,0],[0,0,1,0,0,1,0,0],[0,1,1,0,0,1,1,0]];
+var SPR_PLAYER_WALK_B = [[0,0,1,1,1,1,0,0],[0,1,6,6,6,6,1,0],[0,1,1,6,1,6,1,0],[0,1,6,6,6,6,1,0],[0,0,8,8,8,8,0,0],[0,1,8,8,8,8,1,0],[0,0,1,0,0,1,1,0],[0,1,1,0,1,1,0,0]];
+var SPR_PSHADOW_IDLE = [[0,0,1,1,1,1,0,0],[0,1,4,4,4,4,1,0],[0,1,1,7,1,7,1,0],[0,1,4,4,4,4,1,0],[0,0,3,3,3,3,0,0],[0,1,3,3,3,3,1,0],[0,0,1,0,0,1,0,0],[0,1,1,0,0,1,1,0]];
+var SPR_PSHADOW_WALK_B = [[0,0,1,1,1,1,0,0],[0,1,4,4,4,4,1,0],[0,1,1,7,1,7,1,0],[0,1,4,4,4,4,1,0],[0,0,3,3,3,3,0,0],[0,1,3,3,3,3,1,0],[0,0,1,0,0,1,1,0],[0,1,1,0,1,1,0,0]];
+var SPR_PSHADOW_WAVE = [[0,7,1,1,1,1,0,0],[7,1,4,4,4,4,1,0],[0,1,1,7,1,7,1,0],[0,1,4,4,4,4,1,0],[0,0,3,3,3,3,0,0],[0,1,3,3,3,3,1,0],[0,0,1,0,0,1,0,0],[0,1,1,0,0,1,1,0]];
+var SPR_NPC_IDLE = [[0,0,1,1,1,1,0,0],[0,1,4,4,4,4,1,0],[0,1,1,1,1,1,1,0],[0,1,4,4,4,4,1,0],[0,0,4,4,4,4,0,0],[0,1,4,4,4,4,1,0],[0,0,1,0,0,1,0,0],[0,1,1,0,0,1,1,0]];
+var SPR_NPC_WAVE = [[0,1,1,1,1,1,0,0],[1,1,4,4,4,4,1,0],[0,1,1,1,1,1,1,0],[0,1,4,4,4,4,1,0],[0,0,4,4,4,4,0,0],[0,1,4,4,4,4,1,0],[0,0,1,0,0,1,0,0],[0,1,1,0,0,1,1,0]];
+
+// ============================================================================
+// CONSTANTS / ENUMS
+// ============================================================================
+var WALL_MARGIN = 6, LEFT_BOUNDARY = 64;
+var WIRE_Y = 50, WIRE_POLE1_X = 579, WIRE_POLE2_X = 659, SHOE_X = 619;
+var ZONE5_LIGHT_X = 1169;
+var TOTAL_SCENARIOS = 16;
+
+var MODE_PLAY = 0, MODE_WALK_TO_WALL = 1, MODE_SHADOW_TAKEOVER = 2;
+var STICK_WORLD = 0, STICK_PLAYER = 1, STICK_SHADOW = 2;
+var NPC_WALK = 0, NPC_STEAL_STICK = 1, NPC_LOOK = 2, NPC_TALKING = 3, NPC_WAVING = 4;
+var SHADOW_HIDDEN = 0, SHADOW_LURKING = 1;
+var SCREEN_TITLE = 0, SCREEN_GAME = 1, SCREEN_END = 2;
+
+// ============================================================================
+// DIALOGUE
+// ============================================================================
+var ZONE_INTRO = [
+  ['npc', "Oh, a new walker. You'll get used to the rhythm here soon enough."],
+  ['player_shadow', 'The rhythm?'],
+  ['npc', "Step into the dark, let your shadow loose for a while we all need somewhere to just be ourselves, even if it's only a patch of shade."]
+];
+var DIALOGUE_ZONE1 = [
+  ['npc', 'Hey, new in town?'],
+  ['player_shadow', "Hmm, yes aren't we all?"],
+  ['npc', 'Kinda yes we come and go with walkers, but I have heard of better places where we even get to be permanent,'],
+  ['npc', 'Anyway do you have a cigarette?']
+];
+var ZONE2_RETURN = [
+  ['npc', "Oh hey I see you're back."],
+  ['player_shadow', 'Yes brought you a cigarette!'],
+  ['npc', 'Thanks, nice pun you made back there, I mean front there, ah whatever!'],
+  ['player_shadow', 'Which one? I do that a lot!'],
+  ['npc', "Want a light? No that's not for me! Hahaha"],
+  ['player_shadow', "Glad you're enlightened!"],
+  ['npc', 'Hahaha, then I have to announce to the winner, welcome to the gang.'],
+  ['npc', 'And hey remember, we are all but one!']
+];
+var SCEN2_MAIN = [
+  ['player_shadow', 'Hey'],
+  ['player_shadow', 'HEY!'],
+  ['npc', 'Yes, are you talking to me? Sorry, distracted.'],
+  ['player_shadow', 'By what?'],
+  ['npc', 'You see that shoe up there on the wires?'],
+  ['player_shadow', 'Yes?'],
+  ['npc', "Well I need it, and don't ask why or how it ended up there, just big city problems!"]
+];
+var SCEN2_WITH_STICK = [
+  ['player_shadow', 'I can throw this stick, and with the right angle we might become friends!'],
+  ['npc', "Well that was... ok, let's see what you've got!"],
+  ['player_shadow', 'Ok.'],
+  ['action', 'the stick sails up toward the shoe'],
+  ['npc', 'Oh wow, you really are good with angles. Thanks, I owe you one!'],
+  ['npc', 'A shoe is all that matters!']
+];
+var SCEN2_WITHOUT_STICK = [
+  ['player_shadow', "That's really high."],
+  ['npc', 'Yeah.']
+];
+var ZONE5_CONVO = [
+  ['npc', 'Ha, you made it! Anything I can do for you?'],
+  ['player_shadow', "Yes, I was wondering,why do you stay in this city? Can't you leave?"],
+  ['npc', "Heh, I hear this a lot. Wanderers! This place has made us what we are, we're deeply attached to it."],
+  ['player_shadow', 'Yeah, but how would it work? Can you just walk out and never return? Has anyone ever tried?'],
+  ['npc', "Yes, I've met wanderers who are from here. Believe it or not they're doing pretty well, it's like they don't care about light and shadow anymore."],
+  ['player_shadow', 'How is that possible? What else is there?'],
+  ['npc', 'Well, I guess we all have to find our own way...']
+];
+var ZONE6_CONVO = [
+  ['npc', 'What up?'],
+  ['player_shadow', 'Hey, nothing much, what are you doing?'],
+  ['npc', 'Nothing much.'],
+  ['player_shadow', 'Can I have a cigarette?'],
+  ['npc', 'Sure, there you go! Want a light? Seeing is believing, you know!'],
+  ['player_shadow', "No no thanks, it's not for me!"]
+];
+var ZONE8_CONVO = [
+  ['npc', "Don't look at me, I am just an instrument!"]
+];
+var ZONE7_WATER = [
+  ['npc', 'Hey I am so EXCITED! To ... to talk to someone!'],
+  ['player_shadow', 'Yes you must be lonely I understand.'],
+  ['npc', 'Lonely? Maybe. Or maybe I just forgot there was a whole city on the other side of this puddle.'],
+  ['player_shadow', 'The other side?'],
+  ['npc', "Down here everything is upside down, but it still looks like a proper world, doesn't it? Sky beneath your feet, streets you can never quite walk."],
+  ['player_shadow', 'Is it a copy, or is it its own place?'],
+  ['npc', 'I used to think I was a copy. Now I think a reflection is just a place that only exists when someone is looking at it.'],
+  ['player_shadow', "Then what happens to you when no one's looking?"],
+  ['npc', "The same thing that happens to a thought no one finishes. I don't disappear. I just... wait."]
+];
+
+// ============================================================================
+// GAME STATE
+// ============================================================================
+var app_screen = SCREEN_TITLE;
+var title_scroll = 0, title_car_timer = 0;
+
+var mode = MODE_PLAY;
+var player = { x: 64, y: 100, ground_y: 100, dy: 0, is_jumping: false, speed: 1.75, flip: false, is_walking: false,
+  npc_state: NPC_WALK, state_timer: 0, target_x: 0, dialogue_step: 0 };
+var stick;
+
+var szones = [
+  { id: 1, start_x: 184, end_x: 244 },
+  { id: 2, start_x: 364, end_x: 424 },
+  { id: 3, start_x: 554, end_x: 674 },
+  { id: 4, start_x: 854, end_x: 974 },
+  { id: 5, start_x: 1154, end_x: 1274 },
+  { id: 6, start_x: 1454, end_x: 1574 },
+  { id: 8, start_x: 1874, end_x: 1994 }
+];
+var NUM_ZONES = 7;
+var water_zone = { id: 7, start_x: 1754, end_x: 1854 };
+
+var shadow_npcs = [];
+var skyline_far = [], skyline_blue = [], skyline_mid = [];
+var MAX_CARS = 30;
+var cars = [];
+for (var ci = 0; ci < MAX_CARS; ci++) cars.push({ x: 0, y: 0, speed: 0, flip: false, active: false, type: 0 });
+var car_timer = 0;
+var far_layer_width = 30 * 16, blue_layer_width = 15 * 32, mid_layer_width = 20 * 24;
+
+var in_shadow = false, current_zone = null;
+var cam_x = 0, cam_y = 0;
+var wall_target_x = 0, last_entry_from_start = false;
+
+var shadow_x = 0, shadow_flip = false, shadow_detached = false, shadow_returning = false, shadow_chasing = false;
+var camera_zoom = 1, camera_zoom_target = 1, focus_x = 64, focus_y = 64;
+
+var zone2_branch_chosen = false, zone2_use_stick_branch = false;
+var action_timer = 0, stick_anim_x = 0, stick_anim_y = 0;
+var shoe_retrieved = false;
+
+var zone4_total_visits = 0, zone4_first_side_is_start = false, zone4_last_side_is_start = false, zone4_side_switches = 0;
+var zone4_lines = ['', ''], zone4_line_count = 1;
+
+var zone5_zapped = false, completed_zone6 = false;
+var ripple_timer = 0;
+var player_walk_counter = 0, shadow_walk_counter = 0;
+var player_sprite = 1, detached_sprite = 16;
+var scenarios_completed = 0, window_lit_chance = 0.4;
+
+var visually_in_shadow = false, player_on_water = false;
+
+// RNG (same LCG as the original)
+var rng = 42;
+function srand(s) { rng = s >>> 0; }
+function rnd(max) { rng = (Math.imul(rng, 1103515245) + 12345) >>> 0; return (Math.fround(rng) / 65536) % max; }
+
+function computeLineTimer(text) {
+  var frames = Math.trunc((90 + text.length * 4) * 1.15);
+  if (frames > 1035) frames = 1035;
+  if (frames < 104) frames = 104;
+  return frames;
+}
+
+function zone2TotalLines() { return SCEN2_MAIN.length + (zone2_use_stick_branch ? SCEN2_WITH_STICK.length : SCEN2_WITHOUT_STICK.length); }
+function getZone2Line(step) {
+  if (step < SCEN2_MAIN.length) return SCEN2_MAIN[step];
+  var b = step - SCEN2_MAIN.length;
+  var arr = zone2_use_stick_branch ? SCEN2_WITH_STICK : SCEN2_WITHOUT_STICK;
+  return b < arr.length ? arr[b] : null;
+}
+function getZone2CigLine(step) {
+  var arr = completed_zone6 ? ZONE2_RETURN : DIALOGUE_ZONE1;
+  return step < arr.length ? arr[step] : null;
+}
+
+function spawnVehicle(x, y, speed, flip, type) {
+  for (var i = 0; i < MAX_CARS; i++) {
+    if (!cars[i].active) { cars[i].x = x; cars[i].y = y; cars[i].speed = speed; cars[i].flip = flip; cars[i].active = true; cars[i].type = type; return; }
+  }
+}
+
+// ============================================================================
+// WORLD INIT
+// ============================================================================
+function initWorld() {
+  stick = { x: (szones[0].end_x + szones[1].start_x) / 2, y: 96, active: true, is_thrown: false, h_speed: 0, throw_flip: false, owner: STICK_WORLD };
+  shadow_npcs = [];
+  for (var i = 0; i < NUM_ZONES; i++) {
+    shadow_npcs.push({ x: szones[i].start_x + Math.floor((szones[i].end_x - szones[i].start_x) / 2), y: 100,
+      zone: szones[i], active: true, flip: false, state: SHADOW_HIDDEN, waving: false });
+  }
+  shadow_npcs.push({ x: 0, y: 100, zone: water_zone, active: true, flip: false, state: SHADOW_HIDDEN, waving: false });
+
+  srand(42);
+  skyline_far = [];
+  for (var a = 0; a < 30; a++) {
+    var fx = a * 16 + Math.floor(rnd(6)), fw = 8 + Math.floor(rnd(10)), fh = 35 + Math.floor(rnd(30));
+    skyline_far.push({ x: fx, w: fw, h: fh, color: C.DARK_PURP });
+  }
+  srand(777);
+  skyline_blue = [];
+  for (var b = 0; b < 15; b++) {
+    var bx = b * 32 + Math.floor(rnd(10)), bw = 14 + Math.floor(rnd(14)), bh = 40 + Math.floor(rnd(30));
+    skyline_blue.push({ x: bx, w: bw, h: bh, color: C.BUILDING_BLUE });
+  }
+  srand(1337);
+  skyline_mid = [];
+  for (var m = 0; m < 20; m++) {
+    var mx = m * 24 + Math.floor(rnd(8)), mw = 16 + Math.floor(rnd(12)), mh = 50 + Math.floor(rnd(35));
+    skyline_mid.push({ x: mx, w: mw, h: mh, color: C.DARK_GREEN });
+  }
+}
+
+// ============================================================================
+// LOGIC
+// ============================================================================
+function checkShadowZones() {
+  if (mode !== MODE_PLAY) return;
+  in_shadow = false; current_zone = null;
+  for (var i = 0; i < NUM_ZONES; i++) {
+    if (player.x >= szones[i].start_x && player.x <= szones[i].end_x) { in_shadow = true; current_zone = szones[i]; }
+  }
+}
+
+function updateShadowNPCs() {
+  for (var i = 0; i < 7; i++) {
+    var n = shadow_npcs[i];
+    var player_in_zone = (player.x >= n.zone.start_x && player.x <= n.zone.end_x);
+    var scenario_active_here = (mode === MODE_WALK_TO_WALL || mode === MODE_SHADOW_TAKEOVER) &&
+      current_zone !== null && n.zone.id === current_zone.id;
+    var visible = player_in_zone || scenario_active_here;
+    if (visible) {
+      if (!n.waving) {
+        var talking = shadow_detached && scenario_active_here;
+        n.flip = talking ? (shadow_x < n.x) : (player.x < n.x);
+      }
+      n.state = SHADOW_LURKING;
+    } else {
+      n.state = SHADOW_HIDDEN;
+    }
+  }
+}
+
+function resetShadowTakeover() {
+  mode = MODE_PLAY;
+  shadow_detached = false; shadow_returning = false; shadow_chasing = false;
+  player.dialogue_step = 0;
+  zone2_branch_chosen = false; zone2_use_stick_branch = false;
+  action_timer = 0; zone5_zapped = false;
+  shadow_npcs[7].state = SHADOW_HIDDEN;
+  if (stick.owner === STICK_SHADOW) stick.owner = STICK_PLAYER;
+  for (var i = 0; i < 7; i++) shadow_npcs[i].waving = false;
+}
+
+function beginShadowTakeover() {
+  mode = MODE_SHADOW_TAKEOVER;
+  shadow_detached = true;
+  player.is_walking = false;
+  shadow_x = player.flip ? (player.x + 4) : (player.x - 4);
+  shadow_flip = player.flip;
+  player.dialogue_step = 0;
+  zone2_branch_chosen = false;
+  action_timer = 0; zone5_zapped = false;
+
+  var zid = current_zone ? current_zone.id : 0;
+  if (zid === 1) { player.npc_state = NPC_WALK; player.target_x = shadow_npcs[0].x + 16; }
+  else if (zid === 2) { player.npc_state = NPC_WALK; player.target_x = shadow_npcs[1].x + 16; }
+  else if (zid === 3) { player.npc_state = NPC_WALK; player.target_x = shadow_npcs[2].x + 16; }
+  else if (zid === 4) {
+    zone4_total_visits++;
+    var this_side = last_entry_from_start;
+    if (zone4_total_visits === 1) {
+      zone4_lines[0] = 'I had a dream last night and now I know the secret of the universe, I will tell it to the 3rd person that I see today!';
+      zone4_line_count = 1;
+      zone4_first_side_is_start = this_side;
+      zone4_last_side_is_start = this_side;
+    } else {
+      if (this_side !== zone4_last_side_is_start) zone4_side_switches++;
+      zone4_last_side_is_start = this_side;
+      if (zone4_side_switches >= 2) {
+        zone4_lines[0] = "Well, well, well, here it goes. One's sorrow at the other side of the world can make the entire world suffer;";
+        zone4_lines[1] = "one's happiness can make the entire world smile.";
+        zone4_line_count = 2;
+      } else if (this_side === zone4_first_side_is_start) {
+        zone4_lines[0] = 'Greetings to the first person!'; zone4_line_count = 1;
+      } else {
+        zone4_lines[0] = 'Hey, second person!'; zone4_line_count = 1;
+      }
+    }
+    player.npc_state = NPC_WALK; player.target_x = shadow_npcs[3].x + 16;
+  }
+  else if (zid === 5) { player.npc_state = NPC_WALK; player.target_x = shadow_npcs[4].x + 16; }
+  else if (zid === 6) { player.npc_state = NPC_WALK; player.target_x = shadow_npcs[5].x + 16; }
+  else if (zid === 8) { player.npc_state = NPC_WALK; player.target_x = shadow_npcs[6].x + 16; }
+  else if (stick.owner === STICK_PLAYER) { player.npc_state = NPC_STEAL_STICK; }
+  else {
+    player.npc_state = NPC_WALK;
+    player.state_timer = 30 + Math.trunc(rnd(60));
+    player.target_x = current_zone ? (player.flip ? current_zone.start_x : current_zone.end_x) : player.x;
+  }
+}
+
+function updatePlayerControl(s_pressed) {
+  player.is_walking = false;
+  var zlast = szones[NUM_ZONES - 1];
+  var zone8_width = zlast.end_x - zlast.start_x;
+  var right_boundary = zlast.end_x + zone8_width;
+
+  if (isDown('ArrowLeft', 'KeyA')) {
+    if (player.x - player.speed >= LEFT_BOUNDARY) player.x -= player.speed; else player.x = LEFT_BOUNDARY;
+    player.flip = true; player.is_walking = true;
+  }
+  if (isDown('ArrowRight', 'KeyD')) {
+    if (player.x + player.speed <= right_boundary) player.x += player.speed; else player.x = right_boundary;
+    player.flip = false; player.is_walking = true;
+  }
+
+  if (isPressed('ArrowUp', 'KeyZ') && !player.is_jumping && !in_shadow) { player.dy = -4.5; player.is_jumping = true; }
+
+  if (player.is_jumping) {
+    player.y += player.dy; player.dy += 0.4;
+    if (player.y >= player.ground_y) { player.y = player.ground_y; player.dy = 0; player.is_jumping = false; }
+  }
+
+  if (stick.owner === STICK_PLAYER) {
+    if (isPressed('KeyW')) {
+      stick.owner = STICK_WORLD; stick.active = true; stick.is_thrown = true;
+      stick.y = player.y - 6; stick.throw_flip = player.flip;
+      stick.h_speed = player.flip ? -5 : 5;
+      stick.x = player.flip ? player.x - 8 : player.x + 8;
+    }
+  } else {
+    if (stick.active && !stick.is_thrown && !player.is_jumping && Math.abs(player.x - stick.x) < 10) {
+      if (isPressed('ArrowDown', 'KeyS')) { stick.active = false; stick.owner = STICK_PLAYER; }
+    }
+  }
+
+  var on_water = (player.x >= water_zone.start_x && player.x <= water_zone.end_x);
+  if (shadow_chasing && on_water && s_pressed) {
+    shadow_chasing = false;
+    mode = MODE_SHADOW_TAKEOVER;
+    current_zone = water_zone;
+    var mid = (water_zone.start_x + water_zone.end_x) / 2;
+    shadow_x = mid - 12; shadow_flip = false;
+    shadow_npcs[7].x = mid + 14; shadow_npcs[7].y = 100;
+    shadow_npcs[7].zone = water_zone; shadow_npcs[7].state = SHADOW_LURKING; shadow_npcs[7].flip = true;
+    shadow_detached = true;
+    player.npc_state = NPC_TALKING; player.dialogue_step = 0;
+    player.state_timer = computeLineTimer(ZONE7_WATER[0][1]);
+    return;
+  }
+
+  if (in_shadow && s_pressed && current_zone) {
+    var d_start = Math.abs(player.x - current_zone.start_x);
+    var d_end = Math.abs(player.x - current_zone.end_x);
+    var from_start = (d_start < d_end);
+    last_entry_from_start = from_start;
+    wall_target_x = from_start ? (current_zone.start_x - WALL_MARGIN) : (current_zone.end_x + WALL_MARGIN);
+    mode = MODE_WALK_TO_WALL;
+  }
+}
+
+function updateWalkToWall() {
+  player.is_walking = true;
+  var diff = wall_target_x - player.x, dist = Math.abs(diff);
+  if (dist > 0.01) {
+    var s = player.speed; if (s > dist) s = dist;
+    player.x += (diff > 0) ? s : -s;
+    player.flip = (diff < 0);
+  }
+  if (Math.abs(wall_target_x - player.x) <= 0.01) {
+    player.x = wall_target_x; player.is_walking = false;
+    beginShadowTakeover();
+  }
+}
+
+// Moves the detached shadow toward an NPC (npc.x + 16). Returns true once arrived.
+function approachNpc(idx) {
+  var target = shadow_npcs[idx].x + 16;
+  if (shadow_x < target) { shadow_x += 0.8; if (shadow_x > target) shadow_x = target; shadow_flip = false; return false; }
+  if (shadow_x > target) { shadow_x -= 0.8; if (shadow_x < target) shadow_x = target; shadow_flip = true; return false; }
+  return true;
+}
+
+function finishWave(idx, extra) {
+  player.npc_state = NPC_WAVING; shadow_npcs[idx].waving = true;
+  shadow_returning = true; scenarios_completed++; mode = MODE_PLAY;
+  if (extra) extra();
+}
+
+function updateShadowNPC(s_pressed) {
+  if (s_pressed) { shadow_chasing = true; mode = MODE_PLAY; return; }
+  var advance = isPressed('KeyZ', 'KeyC');
+  var zid = current_zone ? current_zone.id : -1;
+
+  // Zone 1: intro
+  if (zid === 1) {
+    if (player.npc_state === NPC_WALK) {
+      if (approachNpc(0)) { player.npc_state = NPC_TALKING; player.dialogue_step = 0; player.state_timer = computeLineTimer(ZONE_INTRO[0][1]); }
+    } else if (player.npc_state === NPC_TALKING) {
+      player.state_timer--; shadow_flip = true;
+      if (player.state_timer <= 0 || advance) {
+        player.dialogue_step++;
+        if (player.dialogue_step < ZONE_INTRO.length) player.state_timer = computeLineTimer(ZONE_INTRO[player.dialogue_step][1]);
+        else finishWave(0);
+      }
+    }
+    return;
+  }
+
+  // Zone 2: cigarette / return / ending
+  if (zid === 2) {
+    if (player.npc_state === NPC_WALK) {
+      if (approachNpc(1)) {
+        player.npc_state = NPC_TALKING; player.dialogue_step = 0;
+        var first = getZone2CigLine(0);
+        player.state_timer = first ? computeLineTimer(first[1]) : 300;
+      }
+    } else if (player.npc_state === NPC_TALKING) {
+      player.state_timer--; shadow_flip = true;
+      if (player.state_timer <= 0 || advance) {
+        player.dialogue_step++;
+        var next = getZone2CigLine(player.dialogue_step);
+        if (next) player.state_timer = computeLineTimer(next[1]);
+        else if (completed_zone6) { app_screen = SCREEN_END; mode = MODE_PLAY; shadow_detached = false; }
+        else finishWave(1);
+      }
+    }
+    return;
+  }
+
+  // Zone 3: shoe on the wire
+  if (zid === 3) {
+    if (player.npc_state === NPC_WALK) {
+      if (approachNpc(2)) {
+        player.npc_state = NPC_TALKING; player.dialogue_step = 0; zone2_branch_chosen = false;
+        player.state_timer = computeLineTimer(SCEN2_MAIN[0][1]);
+      }
+    } else if (player.npc_state === NPC_TALKING) {
+      shadow_flip = true;
+      if (!zone2_branch_chosen && player.dialogue_step === SCEN2_MAIN.length) {
+        zone2_use_stick_branch = (stick.owner === STICK_PLAYER);
+        zone2_branch_chosen = true;
+      }
+      var total = zone2TotalLines();
+      var line = getZone2Line(player.dialogue_step);
+      if (line && line[0] === 'action') {
+        if (action_timer === 0) { action_timer = 30; stick_anim_x = shadow_x - 4; stick_anim_y = player.y - 10; }
+        action_timer--;
+        var t = 1 - (action_timer / 30);
+        var sx0 = shadow_x - 4, sy0 = player.y - 10;
+        stick_anim_x = sx0 + (SHOE_X - sx0) * t;
+        stick_anim_y = sy0 + (WIRE_Y - sy0) * t;
+        if (action_timer <= 0) {
+          shoe_retrieved = true; stick.active = false;
+          player.dialogue_step++;
+          var nx = getZone2Line(player.dialogue_step);
+          if (nx) player.state_timer = computeLineTimer(nx[1]);
+        }
+      } else if (line) {
+        player.state_timer--;
+        if (player.state_timer <= 0 || advance) {
+          player.dialogue_step++;
+          var nx2 = getZone2Line(player.dialogue_step);
+          if (nx2) player.state_timer = computeLineTimer(nx2[1]);
+        }
+      }
+      if (player.dialogue_step >= total) finishWave(2);
+    }
+    return;
+  }
+
+  // Zone 4: secret of the universe
+  if (zid === 4) {
+    if (player.npc_state === NPC_WALK) {
+      if (approachNpc(3)) { player.npc_state = NPC_TALKING; player.dialogue_step = 0; player.state_timer = computeLineTimer(zone4_lines[0]); }
+    } else if (player.npc_state === NPC_TALKING) {
+      shadow_flip = true; player.state_timer--;
+      if (player.state_timer <= 0 || advance) {
+        player.dialogue_step++;
+        if (player.dialogue_step < zone4_line_count) player.state_timer = computeLineTimer(zone4_lines[player.dialogue_step]);
+        else finishWave(3);
+      }
+    }
+    return;
+  }
+
+  // Zone 5: light zap / full conversation
+  if (zid === 5) {
+    if (player.npc_state === NPC_WALK) {
+      var target = shadow_npcs[4].x + 16;
+      var prev_x = shadow_x;
+      if (shadow_x < target) { shadow_x += 0.8; if (shadow_x > target) shadow_x = target; shadow_flip = false; }
+      else if (shadow_x > target) { shadow_x -= 0.8; if (shadow_x < target) shadow_x = target; shadow_flip = true; }
+      var crossed = (prev_x < ZONE5_LIGHT_X && shadow_x >= ZONE5_LIGHT_X);
+      if (crossed) {
+        zone5_zapped = true; shadow_x = ZONE5_LIGHT_X;
+        player.npc_state = NPC_TALKING; player.dialogue_step = 0;
+        player.state_timer = computeLineTimer('Hey, ooh, ouch!');
+      } else if (shadow_x === target) {
+        zone5_zapped = false;
+        player.npc_state = NPC_TALKING; player.dialogue_step = 0;
+        player.state_timer = computeLineTimer(ZONE5_CONVO[0][1]);
+      }
+    } else if (player.npc_state === NPC_TALKING) {
+      shadow_flip = true;
+      if (zone5_zapped) {
+        player.state_timer--;
+        if (player.state_timer <= 0 || advance) { scenarios_completed++; resetShadowTakeover(); }
+      } else {
+        player.state_timer--;
+        if (player.state_timer <= 0 || advance) {
+          player.dialogue_step++;
+          if (player.dialogue_step < ZONE5_CONVO.length) player.state_timer = computeLineTimer(ZONE5_CONVO[player.dialogue_step][1]);
+          else finishWave(4);
+        }
+      }
+    }
+    return;
+  }
+
+  // Zone 6: cigarette npc
+  if (zid === 6) {
+    if (player.npc_state === NPC_WALK) {
+      if (approachNpc(5)) { player.npc_state = NPC_TALKING; player.dialogue_step = 0; player.state_timer = computeLineTimer(ZONE6_CONVO[0][1]); }
+    } else if (player.npc_state === NPC_TALKING) {
+      shadow_flip = true; player.state_timer--;
+      if (player.state_timer <= 0 || advance) {
+        player.dialogue_step++;
+        if (player.dialogue_step < ZONE6_CONVO.length) player.state_timer = computeLineTimer(ZONE6_CONVO[player.dialogue_step][1]);
+        else finishWave(5, function () { completed_zone6 = true; });
+      }
+    }
+    return;
+  }
+
+  // Zone 7: water reflection conversation
+  if (zid === 7) {
+    if (player.npc_state === NPC_TALKING) {
+      player.state_timer--;
+      if (player.state_timer <= 0 || advance) {
+        player.dialogue_step++;
+        if (player.dialogue_step < ZONE7_WATER.length) player.state_timer = computeLineTimer(ZONE7_WATER[player.dialogue_step][1]);
+        else { shadow_npcs[7].state = SHADOW_HIDDEN; scenarios_completed++; resetShadowTakeover(); }
+      }
+    }
+    return;
+  }
+
+  // Zone 8: the instrument
+  if (zid === 8) {
+    if (player.npc_state === NPC_WALK) {
+      if (approachNpc(6)) { player.npc_state = NPC_TALKING; player.dialogue_step = 0; player.state_timer = computeLineTimer(ZONE8_CONVO[0][1]); }
+    } else if (player.npc_state === NPC_TALKING) {
+      shadow_flip = true; player.state_timer--;
+      if (player.state_timer <= 0 || advance) {
+        player.dialogue_step++;
+        if (player.dialogue_step < ZONE8_CONVO.length) player.state_timer = computeLineTimer(ZONE8_CONVO[player.dialogue_step][1]);
+        else finishWave(6);
+      }
+    }
+    return;
+  }
+
+  // Fallback generic behaviour (unused by current zones)
+  if (player.npc_state === NPC_STEAL_STICK) {
+    if (shadow_x < player.x) { shadow_x += 1; shadow_flip = false; }
+    else if (shadow_x > player.x) { shadow_x -= 1; shadow_flip = true; }
+    else {
+      stick.owner = STICK_SHADOW; player.npc_state = NPC_WALK;
+      player.state_timer = 40 + Math.trunc(rnd(40));
+      player.target_x = player.flip ? current_zone.start_x : current_zone.end_x;
+    }
+  } else if (player.npc_state === NPC_WALK) {
+    player.state_timer--;
+    if (shadow_x < player.target_x) { shadow_x += 1; shadow_flip = false; }
+    else if (shadow_x > player.target_x) { shadow_x -= 1; shadow_flip = true; }
+    if (player.state_timer <= 0 && shadow_x !== player.target_x) { player.npc_state = NPC_LOOK; player.state_timer = 45 + Math.trunc(rnd(45)); }
+  } else if (player.npc_state === NPC_LOOK) {
+    player.state_timer--;
+    if (player.state_timer % 15 === 0 && rnd(1) < 0.2) shadow_flip = !shadow_flip;
+    if (player.state_timer <= 0) { player.npc_state = NPC_WALK; player.state_timer = 30 + Math.trunc(rnd(60)); }
+  }
+}
+
+function updateShadowReturn() {
+  if (!shadow_returning) return;
+  var dx = player.x - shadow_x;
+  if (Math.abs(dx) > 1.5) { shadow_x += (dx > 0) ? 1.4 : -1.4; shadow_flip = (dx < 0); }
+  else { shadow_x = player.x; shadow_returning = false; resetShadowTakeover(); }
+}
+
+function updateShadowChase() {
+  if (!shadow_chasing) return;
+  var dx = player.x - shadow_x;
+  if (Math.abs(dx) > 2) { shadow_x += (dx > 0) ? 1.5 : -1.5; shadow_flip = (dx < 0); }
+  else { shadow_chasing = false; resetShadowTakeover(); }
+}
+
+function updateStickPhysics() {
+  if (stick.is_thrown) {
+    stick.x += stick.h_speed;
+    if (Math.abs(stick.x - player.x) > 150) {
+      stick.is_thrown = false; stick.h_speed = 0;
+      stick.x = player.x + 40; stick.y = 96; stick.owner = STICK_WORLD;
+    }
+  }
+}
+
+function updateCars() {
+  var mid_cam_x = cam_x * 0.60;
+  if (player.is_walking) {
+    car_timer++;
+    if (car_timer >= 150) {
+      car_timer = 0;
+      var dr = rnd(1) > 0.5;
+      var sx1 = dr ? (mid_cam_x - 30) : (mid_cam_x + 150);
+      var sp1 = dr ? 1.2 : -1.2;
+      spawnVehicle(sx1, 96, sp1, !dr, 0);
+      var dr2 = !dr;
+      var sx2 = dr2 ? (mid_cam_x - 30) : (mid_cam_x + 150);
+      var sp2 = dr2 ? 0.6 : -0.6;
+      spawnVehicle(sx2, 96, sp2, !dr2, 0);
+      spawnVehicle(sx1 - (dr ? 15 : -15), 96, sp1, !dr, 1);
+    }
+  }
+  for (var i = 0; i < MAX_CARS; i++) {
+    if (cars[i].active) {
+      cars[i].x += cars[i].speed;
+      if (cars[i].x < mid_cam_x - 50 || cars[i].x > mid_cam_x + 180) cars[i].active = false;
+    }
+  }
+}
+
+function resetForNewGame() {
+  app_screen = SCREEN_TITLE;
+  player.x = 64; player.y = 100; player.flip = false; player.is_jumping = false; player.dy = 0;
+  stick = { x: (szones[0].end_x + szones[1].start_x) / 2, y: 96, active: true, is_thrown: false, h_speed: 0, throw_flip: false, owner: STICK_WORLD };
+  shadow_detached = false; shadow_returning = false; shadow_chasing = false; mode = MODE_PLAY;
+  shoe_retrieved = false; completed_zone6 = false; scenarios_completed = 0;
+  zone4_total_visits = 0; zone4_side_switches = 0;
+  for (var i = 0; i < 8; i++) { shadow_npcs[i].waving = false; shadow_npcs[i].state = SHADOW_HIDDEN; }
+}
+
+// ============================================================================
+// PER-FRAME STEP
+// ============================================================================
+function stepTitle() {
+  title_scroll += 0.4;
+  title_car_timer++;
+  if (title_car_timer >= 90) {
+    title_car_timer = 0;
+    var dr = rnd(1) > 0.5;
+    var sx1 = dr ? (title_scroll * 0.60 - 30) : (title_scroll * 0.60 + 150);
+    spawnVehicle(sx1, 96, dr ? 1.2 : -1.2, !dr, (rnd(1) < 0.25) ? 1 : 0);
+  }
+  for (var i = 0; i < MAX_CARS; i++) {
+    if (cars[i].active) {
+      cars[i].x += cars[i].speed;
+      if (cars[i].x < title_scroll * 0.60 - 50 || cars[i].x > title_scroll * 0.60 + 180) cars[i].active = false;
+    }
+  }
+  window_lit_chance = 0.25 + 0.15 * Math.sin(getTime() * 0.35);
+
+  if (isPressed('Enter', 'NumpadEnter')) {
+    if (app_screen === SCREEN_TITLE) app_screen = SCREEN_GAME;
+    else resetForNewGame();
+    for (var j = 0; j < MAX_CARS; j++) cars[j].active = false;
+    car_timer = 0;
+  }
+}
+
+function step() {
+  if (app_screen !== SCREEN_GAME) { stepTitle(); return; }
+
+  checkShadowZones();
+  var s_pressed = isPressed('KeyS');
+
+  if (mode === MODE_PLAY) updatePlayerControl(s_pressed);
+  else if (mode === MODE_WALK_TO_WALL) updateWalkToWall();
+  else if (mode === MODE_SHADOW_TAKEOVER) updateShadowNPC(s_pressed);
+
+  updateShadowReturn();
+  updateShadowChase();
+  updateStickPhysics();
+  updateCars();
+  updateShadowNPCs();
+
+  visually_in_shadow = false;
+  for (var i = 0; i < NUM_ZONES; i++) {
+    if (player.x >= szones[i].start_x && player.x <= szones[i].end_x) { visually_in_shadow = true; break; }
+  }
+  player_on_water = (player.x >= water_zone.start_x && player.x <= water_zone.end_x);
+
+  var progress = scenarios_completed / TOTAL_SCENARIOS;
+  if (progress > 1) progress = 1;
+  window_lit_chance = 0.4 * (1 - progress);
+
+  cam_x = player.x - 64;
+  cam_y = player.y - 90;
+
+  var shadow_active = (mode === MODE_SHADOW_TAKEOVER && shadow_detached);
+  camera_zoom_target = shadow_active ? 1.6 : 1.0;
+
+  var dialogue_npc_x = shadow_npcs[0].x;
+  if (current_zone) {
+    var id = current_zone.id;
+    if (id === 2) dialogue_npc_x = shadow_npcs[1].x;
+    else if (id === 3) dialogue_npc_x = shadow_npcs[2].x;
+    else if (id === 4) dialogue_npc_x = shadow_npcs[3].x;
+    else if (id === 5) dialogue_npc_x = shadow_npcs[4].x;
+    else if (id === 6) dialogue_npc_x = shadow_npcs[5].x;
+    else if (id === 7) dialogue_npc_x = shadow_npcs[7].x;
+    else if (id === 8) dialogue_npc_x = shadow_npcs[6].x;
+  }
+  var target_focus_x = shadow_active ? (dialogue_npc_x + shadow_x) * 0.5 : (cam_x + BW / 2);
+  var in_water7 = (current_zone && current_zone.id === 7);
+  var target_focus_y = shadow_active ? (in_water7 ? 106 : (player.y - 40)) : (cam_y + BW / 2);
+
+  if (shadow_active) {
+    var ls = 0.06;
+    camera_zoom += (camera_zoom_target - camera_zoom) * ls;
+    focus_x += (target_focus_x - focus_x) * ls;
+    focus_y += (target_focus_y - focus_y) * ls;
+  } else {
+    camera_zoom = 1.0; focus_x = target_focus_x; focus_y = target_focus_y;
+  }
+
+  // Animation counters (previously advanced during drawing)
+  if (player.is_walking) player_walk_counter++; else player_walk_counter = 0;
+  var pf = Math.floor(player_walk_counter / 4) % 2;
+  player_sprite = (!player.is_jumping && player.is_walking && pf === 1) ? 20 : 1;
+
+  if (shadow_detached) {
+    var zapped_hidden = (current_zone && current_zone.id === 5 && zone5_zapped);
+    var in_water_convo = (current_zone && current_zone.id === 7);
+    if (!zapped_hidden && !in_water_convo) {
+      var moving = (player.npc_state === NPC_WALK || player.npc_state === NPC_STEAL_STICK || shadow_returning || shadow_chasing);
+      if (moving) shadow_walk_counter++; else shadow_walk_counter = 0;
+      var sf = Math.floor(shadow_walk_counter / 4) % 2;
+      if (player.npc_state === NPC_WAVING) detached_sprite = 17;
+      else if (moving && sf === 1) detached_sprite = 24;
+      else detached_sprite = 16;
+    }
+  }
+
+  if (player_on_water && player.is_walking) ripple_timer += 1; else ripple_timer = 0;
+}
+
+// ============================================================================
+// DRAWING PRIMITIVES (low-res buffer, pixel-snapped like a GL rasterizer)
+// ============================================================================
+var cam = { tx: 0, ty: 0, z: 1, ox: 64, oy: 64 };
+function setCam(tx, ty, z) { cam.tx = tx; cam.ty = ty; cam.z = z; }
+function wx2b(x) { return (x - cam.tx) * cam.z + cam.ox; }
+function wy2b(y) { return (y - cam.ty) * cam.z + cam.oy; }
+
+function rect(x, y, w, h, color) {
+  if (w <= 0 || h <= 0) return;
+  var sx = Math.round(wx2b(x)), sy = Math.round(wy2b(y));
+  var sw = Math.max(1, Math.round(w * cam.z)), sh = Math.max(1, Math.round(h * cam.z));
+  bctx.fillStyle = color;
+  bctx.fillRect(sx, sy, sw, sh);
+}
+function pix(x, y, color) { rect(x, y, 1, 1, color); }
+function hline(x1, x2, y, color) { rect(x1, y, x2 - x1 + 1, 1, color); }
+function tri(ax, ay, bx, by, cx, cy, color) {
+  bctx.fillStyle = color;
+  bctx.beginPath();
+  bctx.moveTo(wx2b(ax), wy2b(ay)); bctx.lineTo(wx2b(bx), wy2b(by)); bctx.lineTo(wx2b(cx), wy2b(cy));
+  bctx.closePath(); bctx.fill();
+}
+function ellipseFill(cx, cy, rx, ry, color) {
+  bctx.fillStyle = color; bctx.beginPath();
+  bctx.ellipse(wx2b(cx), wy2b(cy), rx * cam.z, ry * cam.z, 0, 0, Math.PI * 2); bctx.fill();
+}
+function ellipseLine(cx, cy, rx, ry, color) {
+  bctx.strokeStyle = color; bctx.lineWidth = 1; bctx.beginPath();
+  bctx.ellipse(wx2b(cx), wy2b(cy), rx * cam.z, ry * cam.z, 0, 0, Math.PI * 2); bctx.stroke();
+}
+
+function drawBitmap(bm, x, y, flipH, flipV) {
+  for (var py = 0; py < 8; py++) {
+    var row = bm[flipV ? 7 - py : py];
+    for (var px = 0; px < 8; px++) {
+      var c = row[px];
+      if (c > 0) {
+        var dx = flipH ? Math.trunc(x + (7 - px)) : Math.trunc(x + px);
+        pix(dx, Math.trunc(y + py), PAL[c]);
+      }
+    }
+  }
+}
+
+function drawGameSprite(id, x, y, flip) {
+  if (id === 16) drawBitmap(SPR_PSHADOW_IDLE, x, y, flip, false);
+  else if (id === 17) drawBitmap(SPR_PSHADOW_WAVE, x, y, flip, false);
+  else if (id === 24) drawBitmap(SPR_PSHADOW_WALK_B, x, y, flip, false);
+  else if (id === 116) drawBitmap(SPR_NPC_IDLE, x, y, flip, false);
+  else if (id === 117) drawBitmap(SPR_NPC_WAVE, x, y, flip, false);
+  else if (id === 4) rect(Math.trunc(x), Math.trunc(y), 8, 2, C.BROWN);
+  else if (id === 20) drawBitmap(SPR_PLAYER_WALK_B, x, y, flip, false);
+  else drawBitmap(SPR_PLAYER_IDLE, x, y, flip, false);
+}
+
+function drawShoe(x, y) { rect(Math.trunc(x) - 2, Math.trunc(y), 4, 2, C.BROWN); }
+
+function drawCigaretteSmoke(x, y, flip) {
+  var cx = flip ? Math.trunc(x + 1) : Math.trunc(x + 6);
+  pix(cx, Math.trunc(y + 2), C.RED);
+  pix(cx, Math.trunc(y - 1), C.DARK_GRAY);
+  pix(cx + (flip ? -1 : 1), Math.trunc(y - 3), C.DARK_GRAY);
+  pix(cx, Math.trunc(y - 5), C.DARK_GRAY);
+}
+
+function drawVehicle(x, y, type) {
+  var body = (type === 1) ? C.WHITE : C.RED;
+  var ix = Math.trunc(x), iy = Math.trunc(y);
+  rect(ix, iy, 5, 2, body);
+  rect(ix + 1, iy - 1, 3, 1, body);
+  pix(ix, iy + 2, C.BLACK);
+  pix(ix + 4, iy + 2, C.BLACK);
+  if (type === 1) { pix(ix + 2, iy, C.RED); pix(ix + 1, iy + 1, C.RED); pix(ix + 3, iy + 1, C.RED); }
+}
+
+function drawCityLayer(buildings, ground_y, is_far, layer_width, current_cam_x) {
+  var offset = Math.floor(current_cam_x / layer_width) * layer_width;
+  for (var ls = -layer_width; ls <= layer_width; ls += layer_width) {
+    for (var i = 0; i < buildings.length; i++) {
+      var b = buildings[i];
+      var render_x = b.x + offset + ls;
+      var roof_y = ground_y - b.h;
+
+      if (!is_far) {
+        var delta = (roof_y - 66) - cam_y;
+        if (delta > 0) {
+          var shadow_top = roof_y - 1;
+          if (delta < 5) {
+            for (var px = 0; px < b.w; px++) if ((px % 2) === 0) pix(Math.trunc(render_x + px), Math.trunc(roof_y - 1), C.DARK_BLUE);
+          } else {
+            shadow_top = roof_y - 2;
+            rect(Math.trunc(render_x), Math.trunc(roof_y - 2), Math.trunc(b.w), 2, C.DARK_BLUE);
+          }
+          rect(Math.trunc(render_x - 1), Math.trunc(shadow_top), 1, Math.trunc(ground_y - shadow_top), C.DARK_GRAY);
+        } else {
+          rect(Math.trunc(render_x - 1), Math.trunc(roof_y), 1, Math.trunc(b.h), C.DARK_GRAY);
+        }
+        rect(Math.trunc(render_x - 1), Math.trunc(ground_y + 1), Math.trunc(b.w + 1), 1, C.DARK_GRAY);
+      }
+
+      rect(Math.trunc(render_x), Math.trunc(roof_y), Math.trunc(b.w), Math.trunc(b.h), b.color);
+
+      var x_step = is_far ? 3 : 4, y_step = is_far ? 4 : 5;
+      var win_color = is_far ? C.DARK_BLUE : C.GREEN;
+      srand(Math.trunc(b.x * 100));
+      for (var wx = render_x + 2; wx <= render_x + b.w - 2; wx += x_step) {
+        for (var wy = roof_y + 3; wy <= ground_y - 4; wy += y_step) {
+          if (rnd(1) < window_lit_chance) {
+            if (is_far) pix(Math.trunc(wx), Math.trunc(wy), win_color);
+            else rect(Math.trunc(wx), Math.trunc(wy), 1, 2, win_color);
+          }
+        }
+      }
+    }
+  }
+}
+
+// ============================================================================
+// TEXT / UI (window space, 768x768)
+// ============================================================================
+function setFont(size) { ctx.font = size + 'px ' + FONT; }
+function measure(text, size) { setFont(size); return ctx.measureText(text).width; }
+function drawText(text, x, y, size, color) {
+  setFont(size); ctx.fillStyle = color; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  ctx.fillText(text, x, y);
+}
+function drawBoldCentered(text, cx, y, size, color) {
+  var tw = measure(text, size), x = Math.trunc(cx - tw / 2);
+  var o = [[0,0],[-1,0],[1,0],[0,-1],[0,1]];
+  for (var i = 0; i < 5; i++) drawText(text, x + o[i][0], y + o[i][1], size, color);
+}
+function drawBoldLeft(text, x, y, size, color) {
+  var o = [[0,0],[-1,0],[1,0],[0,-1],[0,1]];
+  for (var i = 0; i < 5; i++) drawText(text, x + o[i][0], y + o[i][1], size, color);
+}
+
+function wrapText(text, size, maxW) {
+  var words = text.split(' ').filter(function (w) { return w.length > 0; });
+  var lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var cand = cur === '' ? words[i] : cur + ' ' + words[i];
+    if (cur === '' || measure(cand, size) <= maxW) cur = cand;
+    else { lines.push(cur); cur = words[i]; }
+  }
+  if (cur !== '') lines.push(cur);
+  return lines;
+}
+
+function worldToScreen(wx, wy) {
+  return { x: ((wx - focus_x) * camera_zoom + BW / 2) * SCALE, y: ((wy - focus_y) * camera_zoom + BW / 2) * SCALE };
+}
+
+function drawHintText(text, wx, wy) {
+  var fs = Math.trunc(22 * camera_zoom); if (fs < 18) fs = 18;
+  var sp = worldToScreen(wx, wy);
+  var tw = Math.trunc(measure(text, fs));
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(Math.trunc(sp.x) - Math.trunc(tw / 2) - 4, Math.trunc(sp.y) - 3, tw + 8, fs + 6);
+  drawText(text, Math.trunc(sp.x) - Math.trunc(tw / 2), Math.trunc(sp.y), fs, C.WHITE);
+}
+
+function drawSpeechBubble(text, speaker_wx, anchor_wy, point_left, below) {
+  var fs = Math.trunc(12 * camera_zoom);
+  if (fs < 10) fs = 10; if (fs > 30) fs = 30;
+  var pad_x = 8, pad_y = 4, line_gap = 3, max_text_w = 340;
+  var lines = wrapText(text, fs, max_text_w);
+  if (lines.length < 1) lines = [''];
+  var text_w = 0;
+  for (var i = 0; i < lines.length; i++) { var w = Math.trunc(measure(lines[i], fs)); if (w > text_w) text_w = w; }
+  var bw = text_w + pad_x * 2;
+  var bh = fs * lines.length + line_gap * (lines.length - 1) + pad_y * 2;
+  var sp = worldToScreen(speaker_wx, anchor_wy);
+
+  var bx = point_left ? Math.trunc(sp.x) - bw + 10 : Math.trunc(sp.x) - 10;
+  var by = below ? (Math.trunc(sp.y) + 12) : (Math.trunc(sp.y) - bh - 12);
+  if (bx < 4) bx = 4;
+  if (bx + bw > WIN - 4) bx = WIN - 4 - bw;
+  if (by < 4) by = 4;
+  if (by > WIN - bh - 4) by = WIN - bh - 4;
+
+  ctx.fillStyle = C.WHITE; ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeStyle = C.BLACK; ctx.lineWidth = 1;
+  ctx.strokeRect(bx - 2 + 0.5, by - 2 + 0.5, bw + 4 - 1, bh + 4 - 1);
+
+  var tx = point_left ? (bx + bw - 8) : (bx + 8);
+  ctx.fillStyle = C.WHITE; ctx.beginPath();
+  if (below) { var ty = by; ctx.moveTo(tx - 5, ty); ctx.lineTo(tx + 5, ty); ctx.lineTo(tx, ty - 9); }
+  else { var ty2 = by + bh; ctx.moveTo(tx - 5, ty2); ctx.lineTo(tx + 5, ty2); ctx.lineTo(tx, ty2 + 9); }
+  ctx.closePath(); ctx.fill();
+
+  for (var j = 0; j < lines.length; j++) {
+    var lw = Math.trunc(measure(lines[j], fs));
+    drawText(lines[j], bx + Math.trunc((bw - lw) / 2), by + pad_y + j * (fs + line_gap), fs, C.BLACK);
+  }
+}
+function drawDialogueBubble(text, spx, sp_top_y, other_x) { drawSpeechBubble(text, spx, sp_top_y - 8, spx > other_x, false); }
+function drawDialogueBubbleBelow(text, spx, sp_bottom_y, other_x) { drawSpeechBubble(text, spx, sp_bottom_y, spx > other_x, true); }
+
+// ============================================================================
+// RENDER
+// ============================================================================
+function blit() {
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(buf, 0, 0, BW, BW, 0, 0, WIN, WIN);
+}
+
+function renderTitle() {
+  bctx.setTransform(1, 0, 0, 1, 0, 0);
+  bctx.fillStyle = C.TITLE_BG; bctx.fillRect(0, 0, BW, BW);
+
+  setCam(title_scroll * 0.25, 0, 1); drawCityLayer(skyline_far, 100, true, far_layer_width, cam.tx);
+  setCam(title_scroll * 0.40, 0, 1); drawCityLayer(skyline_blue, 100, true, blue_layer_width, cam.tx);
+  setCam(title_scroll * 0.60, 0, 1);
+  drawCityLayer(skyline_mid, 100, false, mid_layer_width, cam.tx);
+  for (var i = 0; i < MAX_CARS; i++) if (cars[i].active) drawVehicle(cars[i].x, cars[i].y - 4, cars[i].type);
+  setCam(0, 0, 1);
+  rect(Math.trunc(title_scroll) - 10, 100, 148, 100, C.GROUND);
+
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, WIN, WIN);
+  blit();
+
+  if (app_screen === SCREEN_TITLE) {
+    var bigS = 72 * 3, restSz = 72, gap = 16;
+    var sW = Math.trunc(measure('S', bigS)), restW = Math.trunc(measure('AYAHA', restSz));
+    var totalW = sW + gap + restW;
+    var startX = Math.trunc(WIN / 2 - totalW / 2);
+    var baseY = Math.trunc(WIN / 2 - 100);
+    drawBoldLeft('S', startX, baseY - Math.trunc((bigS - restSz) / 2), bigS, C.YELLOW);
+    drawBoldLeft('AYAHA', startX + sW + gap, baseY, restSz, C.YELLOW);
+    var subW = Math.trunc(measure('The shadow take over', 26));
+    drawText('The shadow take over', Math.trunc(WIN / 2 - subW / 2), Math.trunc(WIN / 2 + 60), 26, C.YELLOW);
+    if ((Math.floor(getTime() * 2) % 2) === 0) {
+      var prompt = isTouch ? 'Tap to start' : 'Press ENTER to start';
+      var pw = Math.trunc(measure(prompt, 20));
+      drawText(prompt, Math.trunc(WIN / 2 - pw / 2), WIN - 60, 20, C.WHITE);
+    }
+  } else {
+    drawBoldCentered('THE END', WIN / 2, Math.trunc(WIN / 2 - 40), 72, C.YELLOW);
+    if ((Math.floor(getTime() * 2) % 2) === 0) {
+      var prompt2 = isTouch ? 'Tap to return to title' : 'Press ENTER to return to title';
+      var pw2 = Math.trunc(measure(prompt2, 20));
+      drawText(prompt2, Math.trunc(WIN / 2 - pw2 / 2), WIN - 60, 20, C.WHITE);
+    }
+  }
+}
+
+function renderGame() {
+  bctx.setTransform(1, 0, 0, 1, 0, 0);
+  bctx.fillStyle = C.DARK_BLUE; bctx.fillRect(0, 0, BW, BW);
+
+  setCam(focus_x * 0.25, focus_y * 0.25, camera_zoom); drawCityLayer(skyline_far, 100, true, far_layer_width, cam.tx);
+  setCam(focus_x * 0.40, focus_y * 0.40, camera_zoom); drawCityLayer(skyline_blue, 100, true, blue_layer_width, cam.tx);
+  setCam(focus_x * 0.60, focus_y * 0.60, camera_zoom);
+  drawCityLayer(skyline_mid, 100, false, mid_layer_width, cam.tx);
+  for (var i = 0; i < MAX_CARS; i++) if (cars[i].active) drawVehicle(cars[i].x, cars[i].y - 4, cars[i].type);
+
+  setCam(focus_x, focus_y, camera_zoom);
+  rect(Math.trunc(cam_x) - 10, 100, 148, 100, C.GROUND);
+
+  for (var z = 0; z < NUM_ZONES; z++) rect(Math.trunc(szones[z].start_x), -50, Math.trunc(szones[z].end_x - szones[z].start_x), 150, C.BLACK);
+
+  // Water: half-oval, flat top flush with the ground
+  var wmid = (water_zone.start_x + water_zone.end_x) / 2;
+  var wradius = (water_zone.end_x - water_zone.start_x) / 2;
+  ellipseFill(Math.trunc(wmid), 100, Math.trunc(wradius), 8, C.WATER);
+  rect(Math.trunc(wmid - wradius - 2), 85, Math.trunc(wradius * 2 + 4), 15, C.GROUND);
+  if (player_on_water && player.is_walking) {
+    var r = ripple_timer % 24;
+    ellipseLine(Math.trunc(player.x), 100, Math.trunc(6 + r * 0.9), Math.trunc(2 + r * 0.25), rgba(255, 241, 232, 1 - r / 24));
+  }
+
+  // Wire + poles
+  rect(WIRE_POLE1_X - 1, WIRE_Y, 3, 100 - WIRE_Y, C.POLE);
+  rect(WIRE_POLE1_X - 6, WIRE_Y, 12, 2, C.POLE);
+  rect(WIRE_POLE1_X - 6, WIRE_Y - 2, 1, 2, C.POLE);
+  rect(WIRE_POLE1_X + 5, WIRE_Y - 2, 1, 2, C.POLE);
+  rect(WIRE_POLE2_X - 1, WIRE_Y, 3, 100 - WIRE_Y, C.POLE);
+  rect(WIRE_POLE2_X - 6, WIRE_Y, 12, 2, C.POLE);
+  rect(WIRE_POLE2_X - 6, WIRE_Y - 2, 1, 2, C.POLE);
+  rect(WIRE_POLE2_X + 5, WIRE_Y - 2, 1, 2, C.POLE);
+  hline(WIRE_POLE1_X, WIRE_POLE2_X, WIRE_Y + 1, C.POLE);
+  if (!shoe_retrieved) drawShoe(SHOE_X, WIRE_Y);
+
+  // Lamp post + light cone (zone 5)
+  var post_x = ZONE5_LIGHT_X - 15;
+  rect(post_x - 1, 22, 2, 78, C.POLE);
+  rect(post_x - 3, 18, 6, 4, C.POLE);
+  var beam = rgba(255, 236, 39, 0.45);
+  tri(post_x - 1, 22, ZONE5_LIGHT_X - 16, 100, ZONE5_LIGHT_X + 10, 100, beam);
+  tri(post_x - 1, 22, ZONE5_LIGHT_X + 10, 100, post_x + 1, 22, beam);
+
+  // Resident NPC shadows
+  for (var n = 0; n < 7; n++) {
+    var np = shadow_npcs[n];
+    if (np.state === SHADOW_LURKING) {
+      drawGameSprite(np.waving ? 117 : 116, np.x - 4, np.y - 8, np.flip);
+      if (n === 2 && shoe_retrieved) {
+        var fx = np.flip ? (np.x - 4 + 1) : (np.x - 4 + 5);
+        drawShoe(fx, np.y - 2);
+      }
+      if (n === 5) drawCigaretteSmoke(np.x - 4, np.y - 8, np.flip);
+    }
+  }
+  if (shadow_npcs[7].state === SHADOW_LURKING) drawBitmap(SPR_NPC_IDLE, shadow_npcs[7].x - 4, 100, shadow_npcs[7].flip, true);
+
+  if (stick.owner === STICK_WORLD && stick.active) {
+    drawGameSprite(4, stick.x, stick.y - 4, stick.is_thrown ? stick.throw_flip : false);
+  }
+  if (stick.owner === STICK_PLAYER && stick.active) {
+    drawGameSprite(4, player.flip ? player.x - 8 : player.x, player.y - 10, player.flip);
+  }
+
+  var in_water_convo = (current_zone && current_zone.id === 7);
+  if (player_on_water && !(shadow_detached && in_water_convo)) {
+    var rx = player.flip ? (player.x + 4) : (player.x - 4);
+    drawBitmap(SPR_PSHADOW_IDLE, rx - 7, 100, player.flip, true);
+  } else if (visually_in_shadow) {
+    var asx = player.flip ? (player.x + 4) : (player.x - 4);
+    drawGameSprite(16, asx - 4, player.y - 8, player.flip);
+  }
+
+  if (shadow_detached) {
+    var zapped_hidden = (current_zone && current_zone.id === 5 && zone5_zapped);
+    if (!zapped_hidden && !in_water_convo) drawGameSprite(detached_sprite, shadow_x - 4, player.y - 8, shadow_flip);
+    else if (in_water_convo) drawBitmap(SPR_PSHADOW_IDLE, shadow_x - 7, 100, shadow_flip, true);
+
+    if (mode === MODE_SHADOW_TAKEOVER && current_zone && current_zone.id === 3 && player.npc_state === NPC_TALKING) {
+      var cl = getZone2Line(player.dialogue_step);
+      if (cl && cl[0] === 'action' && action_timer > 0) drawGameSprite(4, stick_anim_x, stick_anim_y, false);
+    }
+    if (stick.owner === STICK_SHADOW) drawGameSprite(4, shadow_flip ? shadow_x - 8 : shadow_x, player.y - 10, shadow_flip);
+  }
+
+  drawGameSprite(player_sprite, player.x - 4, player.y - 8, player.flip);
+
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, WIN, WIN);
+  blit();
+
+  // --- window-space overlay: hints + dialogue ---
+  if (mode === MODE_PLAY && stick.owner !== STICK_PLAYER && stick.active && !stick.is_thrown && Math.abs(player.x - stick.x) < 10)
+    drawHintText(isTouch ? 'S to take' : 'DOWN/S to take', stick.x, stick.y - 28);
+  if (visually_in_shadow && !shadow_detached && mode === MODE_PLAY && !player_on_water)
+    drawHintText('S: Shadow Takeover', player.x, player.y - 32);
+  if (shadow_chasing && player_on_water)
+    drawHintText('S: Talk to the reflection', player.x, player.y - 32);
+
+  if (shadow_detached && mode === MODE_SHADOW_TAKEOVER && player.npc_state === NPC_TALKING && current_zone) {
+    var id = current_zone.id, step = player.dialogue_step, cl2;
+    if (id === 1 && step < ZONE_INTRO.length) {
+      cl2 = ZONE_INTRO[step];
+      if (cl2[0] === 'npc') drawDialogueBubble(cl2[1], shadow_npcs[0].x, shadow_npcs[0].y, shadow_x);
+      else drawDialogueBubble(cl2[1], shadow_x, player.y, shadow_npcs[0].x);
+    } else if (id === 2) {
+      cl2 = getZone2CigLine(step);
+      if (cl2) {
+        if (cl2[0] === 'npc') drawDialogueBubble(cl2[1], shadow_npcs[1].x, shadow_npcs[1].y, shadow_x);
+        else drawDialogueBubble(cl2[1], shadow_x, player.y, shadow_npcs[1].x);
+      }
+    } else if (id === 3) {
+      cl2 = getZone2Line(step);
+      if (cl2 && cl2[0] !== 'action') {
+        if (cl2[0] === 'npc') drawDialogueBubble(cl2[1], shadow_npcs[2].x, shadow_npcs[2].y, shadow_x);
+        else drawDialogueBubble(cl2[1], shadow_x, player.y, shadow_npcs[2].x);
+      }
+    } else if (id === 4 && step < zone4_line_count) {
+      drawDialogueBubble(zone4_lines[step], shadow_npcs[3].x, shadow_npcs[3].y, shadow_x);
+    } else if (id === 5) {
+      if (zone5_zapped) drawDialogueBubble('Hey, ooh, ouch!', shadow_npcs[4].x, shadow_npcs[4].y, shadow_x);
+      else if (step < ZONE5_CONVO.length) {
+        cl2 = ZONE5_CONVO[step];
+        if (cl2[0] === 'npc') drawDialogueBubble(cl2[1], shadow_npcs[4].x, shadow_npcs[4].y, shadow_x);
+        else drawDialogueBubble(cl2[1], shadow_x, player.y, shadow_npcs[4].x);
+      }
+    } else if (id === 6 && step < ZONE6_CONVO.length) {
+      cl2 = ZONE6_CONVO[step];
+      if (cl2[0] === 'npc') drawDialogueBubble(cl2[1], shadow_npcs[5].x, shadow_npcs[5].y, shadow_x);
+      else drawDialogueBubble(cl2[1], shadow_x, player.y, shadow_npcs[5].x);
+    } else if (id === 7 && step < ZONE7_WATER.length) {
+      cl2 = ZONE7_WATER[step];
+      if (cl2[0] === 'npc') drawDialogueBubbleBelow(cl2[1], shadow_npcs[7].x, 112, shadow_x);
+      else drawDialogueBubbleBelow(cl2[1], shadow_x, 112, shadow_npcs[7].x);
+    } else if (id === 8 && step < ZONE8_CONVO.length) {
+      cl2 = ZONE8_CONVO[step];
+      if (cl2[0] === 'npc') drawDialogueBubble(cl2[1], shadow_npcs[6].x, shadow_npcs[6].y, shadow_x);
+      else drawDialogueBubble(cl2[1], shadow_x, player.y, shadow_npcs[6].x);
+    }
+  }
+}
+
+function render() {
+  ctx.setTransform(K, 0, 0, K, 0, 0);
+  if (app_screen === SCREEN_GAME) renderGame(); else renderTitle();
+}
+
+// ============================================================================
+// MAIN LOOP (fixed 60 Hz logic, like the original)
+// ============================================================================
+var STEP_MS = 1000 / 60, acc = 0, last = performance.now();
+function frame(now) {
+  var dt = now - last; last = now;
+  if (dt > 100) dt = 100;
+  acc += dt;
+  while (acc >= STEP_MS) { step(); keys.pressed = {}; acc -= STEP_MS; }
+  render();
+  requestAnimationFrame(frame);
+}
+
+initWorld();
+layout();
+requestAnimationFrame(frame);
+
+// Expose a tiny hook for automated testing only.
+window.__sayaha = { step: step, render: render, keys: keys, state: function () { return { app_screen: app_screen, mode: mode, px: player.x, completed_zone6: completed_zone6, shadow_chasing: shadow_chasing }; } };
+})();
+// Younx, Coded in 36.214° N and 58.796° E, © [2026] [YSOGANDI]. All Rights Reserved
+</script>
+</body>
+</html>
